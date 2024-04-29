@@ -1,0 +1,431 @@
+---
+title: "bmi_analysis"
+author: '700037484'
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+`r #requires bb_init_analysis.Rmd`
+
+``` {r GLOBAL VARS}
+PATH_infections_df = "file-#" # UK Biobank provided file-id for infections dataframe
+PATH_BMI_data = "file-#" # Request file ID privately from Harry Green
+```
+
+```{r Loading Data}
+#> Downloading and Loading Infections_df
+system(paste0('dx download ', PATH_infections_df))
+raw_infections = read_csv('infections_df_2024-03-12.csv')
+
+#> Downloading and loading BMI GRS data
+system(paste0('dx download ', PATH_BMI_data))
+raw_bmi = read_tsv('lifted_GRSs.tsv')
+```
+
+``` {r Creating BMI DF}
+
+#> Preparing df:
+#>  - filter out patients with different types of infections (combo infections)
+#>  - Left_join BMI GRS for MR use, can probably use inner_join for faster join/filter function
+#>  - Filter anyone without BMI GRS
+#>  - N = 381,137
+bmi_df = raw_infections %>%
+  filter(infection_type != "mixed") %>%
+  left_join(
+    raw_bmi %>% select(eid, bmi_73_grs),
+    by = "eid"
+  ) %>%
+  filter(!is.na(bmi_73_grs))
+
+```
+
+``` {r Descriptives Table: BMI}
+#> ------------------------- Manual: N Numbers  ----------------------------- <#
+#> N numbers for each classification:
+#>  - bacterial: 31,226  
+#>  - control  : 335,958  
+#>  - fungal   : 549  
+#>  - viral    : 13,404
+#>  - N        : 381,137
+bmi_df %>%
+  mutate(infection_type = as.factor(infection_type)) %>%
+  select(infection_type) %>%
+  summary()
+
+#> ------------------------- Desc Table: CSV  ----------------------------- <#
+#> List of desired descriptive variables
+list_baseline_vars = c("assess_age", "sex", 'diabetes_diagnosed', 'whr', 'glucose', 'hba1c', 'hdl_cholesterol', 'ldl_cholesterol', 'total_cholesterol', 'bmi')
+
+#> function to manually rename variables to human-readable
+rename_vars = function(x) {
+  x = gsub("_", " ", x)  # Common: replace _ with " "
+  x = gsub("assess", "assessment", x)
+  x = gsub("whr", "waist-hip-ratio", x)
+  x = gsub("diabetes diagnosed", "Diabetes Prevalence", x)
+  return(x)
+}
+
+#> Generate descriptives table
+#>  - Modify categorical variables --> binary
+#>  - Summarise to create mean median mode, round mean and median
+temp = bmi_df %>%
+  group_by(infection_type) %>%
+  mutate(
+    sex = ifelse(
+      sex == 'Male',
+      0,
+      ifelse(
+        sex == 'Female',
+        1,
+        NA
+      )
+    ),
+    diabetes_diagnosed = ifelse(
+      diabetes_diagnosed == 'Yes',
+      1,
+      ifelse(
+        diabetes_diagnosed == 'No',
+        0,
+        NA
+      )
+    ) 
+  ) %>%
+  summarise(across(
+    list_baseline_vars,
+    list(
+      mean = ~ round(mean(., na.rm = TRUE), 2),
+      median = ~ round(median(., na.rm = TRUE), 2),
+      N = ~ sum(!is.na(.))
+    )
+  ))
+
+#> Once Summary table has been created, loop through and collapse median, mean, N number columns into final formatted table
+#>  - Write reproducible code / R package for this? R packages for Descriptive tables are a pain in the a*
+var_index = 1
+formatted_temp = temp[, 1]
+
+for (i in seq(2, ncol(temp), by = 3)) {
+  var_data = temp[, i:(i + 2)]
+  colnames(var_data) = c('mean', 'median', 'n')
+
+  var_data = var_data %>%
+    mutate(!!sym(paste0(list_baseline_vars[var_index])) := paste0(mean, " | ", median, " (", n, ")")) %>%
+    select(4)
+  
+  formatted_temp = cbind(formatted_temp, var_data)
+
+  var_index = var_index + 1
+}
+
+formatted_temp = formatted_temp %>%
+    rename_with(rename_vars)
+
+# Flip columns rows of the dataframe
+desc_table = data.frame(t(formatted_temp[-1]))
+colnames(desc_table) = unlist(formatted_temp[, 1])
+
+# Saving as CSV
+write.csv(
+  desc_table,
+  file = paste0("saveables/tables/", "BMI_descriptive_stats.csv")
+)
+
+# Clean environment
+remove(list_baseline_vars, rename_vars, temp, formatted_temp, var_index, var_data, i)
+
+```
+
+
+``` {r infection-specific DF creation}
+
+# BACTERIAL vs CONTROL HBA1C
+bacterial_df = bmi_df %>%
+  filter(bacterial == 1 | control == 1) %>%
+  mutate(cat = "bacterial")
+
+# FUNGAL vs CONTROL HBA1C
+fungal_df = bmi_df %>%
+  filter(fungal == 1 | control == 1) %>%
+  mutate(cat = "fungal")
+
+# VIRAL vs CONTROL HBA1C
+viral_df = bmi_df %>%
+  filter(viral == 1 | control == 1) %>%
+  mutate(cat = "viral")
+
+```
+
+``` {r Infections vs Controls: BMI}
+#> ------------------------------ Density plot  ----------------------------- <#
+#> Vector defining colours for images:
+colors = c("bacterial" = "blue", "fungal" = "red", "viral" = "green", "control" = "white")
+
+temp = rbind(
+  bacterial_df,
+  fungal_df,
+  viral_df
+) %>%
+  filter(!is.na(bmi))
+
+graph_bmi_infectionsVScontrols = ggplot(temp, aes(x = bmi, fill = infection_type)) + 
+  geom_density(alpha = 0.5, position = "identity") +
+  # scale_x_continuous(limits = c(20, 55)) +
+  labs(
+    x = "BMI (kg m^-2)"
+  )+
+  scale_fill_manual(values = colors) +
+  facet_wrap(~cat, ncol = 1)
+
+# save
+ggsave(
+  plot = graph_bmi_infectionsVScontrols,
+  paste0("./saveables/graphs/bmi_graph_descriptives.png"),
+  width = 8,
+  height = 6
+)
+```
+
+``` {r Observational Association: LogReg}
+#> ------------------------- Logistic Regression  --------------------------- <#
+#Bacterial vs Controls
+bacterial_lr <- glm(bacterial ~ bmi,
+  data = bacterial_df,
+  family = "binomial"
+)
+
+#Fungal
+fungal_lr <- glm(fungal ~ bmi,
+  data = fungal_df,
+  family = "binomial"
+)
+
+#Viral
+viral_lr <- glm(viral ~ bmi,
+  data = viral_df,
+  family = "binomial"
+)
+
+#> ------------------------------- Forest Plot ------------------------------ <#
+#> Graphing with graph_summs()
+graph_logreg_bmiVSinfection =  plot_summs(
+  bacterial_lr,
+  fungal_lr,
+  viral_lr,
+  model.names = c("Bacterial ***", "Fungal ***", "Viral ***"),
+  exp = TRUE,
+  legend.title = "Infections",
+  point.size = 10,
+  line.size = c(0.8, 2)
+) +
+  xlab("Odds of Infection per 1 kg m^-2 BMI increase")
+
+# Going into theme list which defines Y axis text and setting blank
+graph_logreg_bmiVSinfection$theme$axis.text.y <- element_blank()
+
+# save
+ggsave(
+  plot = graph_logreg_bmiVSinfection,
+  paste0("./saveables/graphs/ObsvAssoc_logreg_forest.png"),
+  width = 6,
+  height = 3
+)
+
+#> ------------------------ P-Values of LogReg ------------------------------ <#
+#> Puling coefficients + CONFINT + P values
+coef_values = data.frame(
+  Origin = c("Bacterial", "Fungal", "Viral"),
+  Coef_logit = c(
+    summary(bacterial_lr)$coefficients["bmi", 1],
+    summary(fungal_lr)$coefficients["bmi", 1],
+    summary(viral_lr)$coefficients["bmi", 1]
+  )
+)
+
+# pulling 95% confidence intervals to add into coef_values
+confint_values_bacterial <- confint(bacterial_lr, "bmi")
+confint_values_fungal <- confint(fungal_lr, "bmi")
+confint_values_viral <- confint(viral_lr, "bmi")
+
+# Store Confidence Intervals in Data Frames
+coef_values = coef_values %>%
+ mutate(
+    Upper_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[2],
+      Origin == "Fungal" ~ confint_values_fungal[2],
+      Origin == "Viral" ~ confint_values_viral[2]
+    ),
+    Lower_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[1],
+      Origin == "Fungal" ~ confint_values_fungal[1],
+      Origin == "Viral" ~ confint_values_viral[1]
+    ),
+ )
+
+# P values
+# Extract P-values for the bmi coefficient from each model
+p_values_bacterial <- summary(bacterial_lr)$coefficients["bmi", 4]
+p_values_fungal <- summary(fungal_lr)$coefficients["bmi", 4]
+p_values_viral <- summary(viral_lr)$coefficients["bmi", 4]
+
+# Add P-values to coef_values
+coef_values <- coef_values %>%
+ mutate(
+    P_Value = case_when(
+      Origin == "Bacterial" ~ p_values_bacterial,
+      Origin == "Fungal" ~ p_values_fungal,
+      Origin == "Viral" ~ p_values_viral
+    )
+ )
+
+
+#> Save values as CSV
+write.csv(
+  coef_values,
+  file = paste0("saveables/tables/", "ObsvAssoc_logreg_BMI_values.csv"),
+  row.names=FALSE
+)
+```
+
+``` {r Mendelian Randomisation Analysis: 73-SNP BMI}
+#> -------------------------------- MR DF -------------------------------- <#
+# Create linear model to predict BMI based on 73-SNP GRS
+bmi_mr_assoc=glm(
+  data = bmi_df,
+  formula = bmi ~ bmi_73_grs,
+  na.action="na.exclude" # remove anyone without GRS data
+)
+
+#> Create MR df with eid, predicted BMI based on linear model, including residuals
+#>  - Then inner_join all baseline data onto those that have GRS
+bmi_mr_frame = data.frame(
+  eid = bmi_df$eid,
+  bmi_pred = predict(bmi_mr_assoc,bmi_df),
+  bmi_resid = residuals(bmi_mr_assoc,na.action=na.exclude)
+) %>%
+  inner_join(bmi_df) %>%
+  filter(!is.na(bmi_pred))
+
+
+#> ---------------- Recreating infection-sepcific DF for MR ----------------- <#
+# BACTERIAL vs CONTROL HBA1C
+bacterial_df = bmi_mr_frame %>%
+  filter(bacterial == 1 | control == 1) %>%
+  mutate(cat = "bacterial")
+
+# FUNGAL vs CONTROL HBA1C
+fungal_df = bmi_mr_frame %>%
+  filter(fungal == 1 | control == 1) %>%
+  mutate(cat = "fungal")
+
+# VIRAL vs CONTROL HBA1C
+viral_df = bmi_mr_frame %>%
+  filter(viral == 1 | control == 1) %>%
+  mutate(cat = "viral")
+
+
+#> -------------------------------- MR -------------------------------------- <#
+
+#Bacterial vs Controls LOGREG-MR
+bacterial_lr = glm(bacterial ~ bmi_pred,
+  data = bacterial_df,
+  family = "binomial"
+)
+
+#Fungal LOGREG-MR
+fungal_lr = glm(fungal ~ bmi_pred,
+  data = fungal_df,
+  family = "binomial"
+)
+
+#Viral LOGREG-MR
+viral_lr = glm(viral ~ bmi_pred,
+  data = viral_df,
+  family = "binomial"
+)
+
+#> Graphing with graph_summs()
+graph_logreg_GenBmiVSInfection = plot_summs(
+  bacterial_lr,
+  fungal_lr,
+  viral_lr,
+  model.names = c("Bacterial", "Fungal", "Viral"),
+  exp = TRUE,
+  legend.title = "Infections",
+  point.size = 10,
+  line.size = c(0.8, 2)
+) +
+  xlab("Odds of Infection per genetically-predicted 1 kg m^-2 BMI increase")
+
+# Going into theme list which defines Y axis text and setting blank
+graph_logreg_GenBmiVSInfection$theme$axis.text.y = element_blank()
+
+# save
+ggsave(
+  plot = graph_logreg_GenBmiVSInfection,
+  paste0("./saveables/graphs/logreg_MR_bmiinfection.png"),
+  width = 8,
+  height = 3
+)
+
+#> ------------------------ P-Values of LogReg ------------------------------ <#
+#> Puling coefficients + CONFINT + P values
+coef_values = data.frame(
+  Origin = c("Bacterial", "Fungal", "Viral"),
+  Coef_logit = c(
+    summary(bacterial_lr)$coefficients["bmi_pred", 1],
+    summary(fungal_lr)$coefficients["bmi_pred", 1],
+    summary(viral_lr)$coefficients["bmi_pred", 1]
+  )
+)
+
+# pulling 95% confidence intervals to add into coef_values
+confint_values_bacterial <- confint(bacterial_lr, "bmi_pred")
+confint_values_fungal <- confint(fungal_lr, "bmi_pred")
+confint_values_viral <- confint(viral_lr, "bmi_pred")
+
+# Store Confidence Intervals in Data Frames
+coef_values = coef_values %>%
+ mutate(
+    Upper_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[2],
+      Origin == "Fungal" ~ confint_values_fungal[2],
+      Origin == "Viral" ~ confint_values_viral[2]
+    ),
+    Lower_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[1],
+      Origin == "Fungal" ~ confint_values_fungal[1],
+      Origin == "Viral" ~ confint_values_viral[1]
+    ),
+ )
+
+# P values
+# Extract P-values for the bmi coefficient from each model
+p_values_bacterial <- summary(bacterial_lr)$coefficients["bmi_pred", 4]
+p_values_fungal <- summary(fungal_lr)$coefficients["bmi_pred", 4]
+p_values_viral <- summary(viral_lr)$coefficients["bmi_pred", 4]
+
+# Add P-values to coef_values
+coef_values <- coef_values %>%
+ mutate(
+    P_Value = case_when(
+      Origin == "Bacterial" ~ p_values_bacterial,
+      Origin == "Fungal" ~ p_values_fungal,
+      Origin == "Viral" ~ p_values_viral
+    )
+ )
+
+
+#> Save values as CSV
+write.csv(
+  coef_values,
+  file = paste0("saveables/tables/", "MR_BMI_logreg_pvalues.csv"),
+  row.names=FALSE
+)
+```
+
+``` {r Writing LR .csvs to DNANexus}
+
+system(paste0('dx upload ', "saveables/tables/ObsvAssoc_logreg_BMI_values.csv"))
+system(paste0('dx upload ', "saveables/tables/MR_BMI_logreg_pvalues.csv"))
+
+```

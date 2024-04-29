@@ -1,0 +1,226 @@
+---
+title: "cohort creation"
+author: "Ethan de Villiers"
+date: "`r Sys.Date()`"
+output: html_document
+---
+``` {r GLOBAL VARS}
+COMPILED_CODELIST_FILEID = "file-#" # placeholder data. On UKBB platform, click on compiled_codelist.csv file, and copy file-id code.
+
+GRS_2HG_FILEID = "file-#" # 4x GRS scores indexed by participant ID (EID). Hosted privately by Harry Green, requires private correspondance.
+GRS_FG_FILEID = "file-#"
+GRS_GLYHBA1C_FILEID = "file-#"
+GRS_NGLYHBA1C_FILEID = "file-#"
+
+GCK_FILEID = "file-#" # Kashyap Patel's GCK classification data by EID
+```
+
+
+``` {r Packages & Init}
+#> ----------------------------- Packages ---------------------------- <#
+install.packages('tidyverse')
+library(tidyverse)
+
+library(devtools) # download Harry's github file
+source_url("https://raw.githubusercontent.com/hdg204/UKBB/main/UKBB_Health_Records_New_Project.R") 
+
+#> -------------------------- Get Codelist data ---------------------------- <#
+#> Download compiled_codelist.csv using UKbb file-id
+system(paste0(
+  'dx download ',
+  COMPILED_CODELIST_FILEID
+))
+
+#> Load compiled_codelist.csv into memory as dataframe "codelist"
+codelist = read_csv('compiled_codelist.csv')
+```
+
+``` {r Adding Infections data}
+#> --------------------- Get and Load Viral infections data ----------------- <#
+#> Pull all viral infections data from ICD10 using "viral" codes in compiled_codelist.csv
+temp = read_ICD10(
+  codelist %>%
+    filter(Infection == "viral") %>%
+    select(ICD10) %>%
+    pull()
+)
+
+#> Store an array of patient IDs who have had viral infection 57,266 eids, 28,662 unique, 12,893 multiple infections
+viral_eids = temp %>%
+  select(eid) %>% 
+  pull()
+
+#> Pull Harry's baseline_table into a new infections_df dataframe
+#> Then classify viral infections based on EID
+infections_df = baseline_table %>%
+  mutate(
+    viral = as.logical( eid %in% viral_eids ),
+    viral_multiple = as.logical( eid %in% viral_eids[duplicated(viral_eids)] )
+  )
+
+
+#> ---------------------- Bacterial -------------------------------- <#
+#> Pull all bacterial infections data from ICD10 using "bacterial" codes in compiled_codelist.csv
+temp = read_ICD10(
+  codelist %>%
+    filter(Infection == "bacterial") %>%
+    select(ICD10) %>%
+    pull()
+)
+
+#> Store a list of patient IDs who have had bacterial infection: 139,481 eids, 51,594 unique
+bacterial_eids = temp %>%
+  select(eid) %>% 
+  pull()
+
+#> Classify bacterial infections in participants
+infections_df = infections_df %>%
+  mutate(
+    bacterial = as.logical( eid %in% bacterial_eids ),
+    bacterial_multiple = as.logical( eid %in% bacterial_eids[duplicated(bacterial_eids)] )
+  )
+
+#> ---------------------- Fungal -------------------------------- <#
+#> Pull all fungal infections data from ICD10 using "fungal" codes in compiled_codelist.csv
+temp = read_ICD10(
+  codelist %>%
+  filter(Infection == "fungal") %>%
+  select(ICD10) %>%
+  pull()
+)
+
+#> Store a list of patient IDs who have had fungal infection: 3883 eids, 1829 unique
+fungal_eids = temp %>%
+  select(eid) %>% 
+  pull()
+
+
+infections_df = infections_df %>%
+  mutate(
+    fungal = as.logical( eid %in% fungal_eids ),
+    fungal_multiple = as.logical( eid %in% fungal_eids[duplicated(fungal_eids)] )
+  )
+
+#> ------------------ CONTROL ---------------- <#
+infections_df = infections_df %>%
+  mutate(control = ifelse( !viral & !bacterial & !fungal, TRUE, FALSE))
+
+
+#> ------------------- CATEGORIES ------------------------ <#
+infections_df = infections_df %>%
+  mutate(
+    infection_type = case_when(
+      viral & !bacterial & !fungal ~ "viral",
+      !viral & bacterial & !fungal ~ "bacterial",
+      !viral & !bacterial & fungal ~ "fungal",
+      !viral & !bacterial & !fungal ~ "control",
+      TRUE ~ "mixed"
+    ),
+    infection_multiple = ifelse(
+      viral_multiple | bacterial_multiple | fungal_multiple,
+      TRUE,
+      FALSE
+    )
+  )
+```
+
+``` {r Adding GRS data}
+#> ------------------- DOWNLOADING GRS DATA ------------------------ <#
+system(paste0(
+  'dx download ',
+   GRS_2HG_FILEID
+))
+system(paste0(
+  'dx download ',
+   GRS_FG_FILEID
+))
+system(paste0(
+  'dx download ',
+   GRS_GLYHBA1C_FILEID
+))
+system(paste0(
+  'dx download ',
+   GRS_NGLYHBA1C_FILEID
+))
+
+#> ------------------- GRS to dataframe  ------------------------ <#
+th_grs_lookup = read_csv("2hGlu_grs.csv")
+fg_grs_lookup = read_csv("FG_grs.csv")
+glyhba1c_grs_lookup = read_csv("HbA1c_gly_grs.csv")
+nonhba1c_grs_lookup = read_csv("HbA1c_non_gly_grs.csv")
+
+
+#> ----------------- LEFT JOINING GRS data onto cohort ---------------------- <#
+infections_df = infections_df %>%
+  left_join(
+    th_grs_lookup %>% rename(th_grs = grs),
+    by = 'eid'
+  ) %>%
+  left_join(
+    fg_grs_lookup %>% rename(fg_grs = grs),
+    by = 'eid'
+  ) %>%
+  left_join(
+    glyhba1c_grs_lookup %>% rename(hba1c_glyc_grs = grs),
+    by = 'eid'
+  ) %>%
+  left_join(
+    nonhba1c_grs_lookup %>% rename(hba1c_nonglyc_grs = grs),
+    by = 'eid'
+  )
+```
+
+
+``` {r Adding GCK data}
+#> ------------------- DOWNLOADING GCK DATA ------------------------ <#
+system(paste0(
+  'dx download',
+   GCK_FILEID
+))
+
+#> ------------------- GCK to dataframe  ------------------------ <#
+gck_df = read.table(
+  "gck_patho_ids_450k.tsv",
+  sep="\t", header=TRUE
+)
+
+#> ----------------- Loading GCK data onto cohort ---------------------- <#
+
+#> Get EID array of all UKbb participants with pathogenic GCK mutations
+gck_IDlist = gck_df %>%
+  filter(as.logical(pathogenic)) %>%
+  select(eid) %>% pull()
+
+#> Load onto infections_df
+infections_df = infections_df %>%
+  mutate(GCK = ifelse(
+    eid %in% gck_IDlist,
+    TRUE,
+    FALSE
+  ))
+```
+
+
+
+``` {r Uploading Cohort to UKbb}
+#> Sanity check
+#> Recommended to summary() / view() data before uploading completed version, although pipeline has never broken for me.
+# summary(infections_df)
+# view(infections_df)
+
+#> ----------------- Uploading---------------------- <#
+#> cohort = infections_df.csv
+#> Estimated ~212 MiB in size = 0.223 * £0.0141 / 30 = £0.0001 per month
+
+#> generating time-stamped name for DF (identification and versioning purposes)
+filename = paste0("infections_df_",Sys.Date(),".csv")
+
+#> Create .csv on UKbb session
+write_csv(
+  infections_df,
+  file = filename
+)
+
+#> Upload file to UK-bb
+system(paste0('dx upload ', filename))
+```

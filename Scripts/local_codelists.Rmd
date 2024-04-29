@@ -1,0 +1,84 @@
+---
+title: "Codelist compilation"
+author: "Ethan de Villiers"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r init}
+library(tidyverse)
+```
+
+``` {r Creating Dataframe of Codelist}
+#> Save list of codelists in "~/Codes/" directory as list_codelists
+list_codelists = list.files(path="./Codes")
+
+#> Create list of fungal codelists
+fungal_codelist = c("exeter_icd10_genitalinfection_fungal.txt", "exeter_icd10_skininfection_fungal.txt")
+
+#> Create list of bacterial codelists
+bacterial_codelist = c("exeter_icd10_pneumonia_bacterial.txt", "exeter_icd10_skininfection_bacterial.txt")
+
+#> Create list of Viral codelists
+viral_codelist = c("exeter_icd10_influenza.txt", "exeter_icd10_otherrespiratoryinfection_viral.txt")
+
+#> Create empty dataframe
+df = data.frame() 
+
+#> Read all fungal codes into df
+for (fungal in fungal_codelist){
+  print(paste0("./Codes/", fungal))
+  df = rbind(
+    df,
+    read.table(
+      paste0("./Codes/", fungal), 
+      sep="\t",
+      skip = 1
+    ) %>%
+      mutate(Infection = "fungal")
+  )
+}
+
+#> Read all viral codes into df
+for (viral in viral_codelist){
+  print(paste0("./Codes/", viral))
+  df = rbind(
+    df,
+    read.table(
+      paste0("./Codes/", viral), 
+      sep="\t",
+      skip = 1
+    ) %>%
+      mutate(Infection = "viral")
+  )
+}
+
+#> Read all bacterial codes into df
+for (bacterial in bacterial_codelist){
+  print(paste0("./Codes/", bacterial))
+  df = rbind(
+    df,
+    read.table(
+      paste0("./Codes/", bacterial), 
+      sep="\t",
+      skip = 1
+    ) %>%
+      mutate(Infection = "bacterial")
+  )
+}
+
+#> Cleaning Up DF
+df = df %>%
+  rename(
+    ICD10 = V1,
+    Description = V2
+  )
+
+#> Clean Environment
+remove(bacterial, fungal, viral, bacterial_codelist, fungal_codelist, viral_codelist, list_codelists)
+```
+
+``` {r Export codelist df for DNANexus use}
+#> Writes file to local working environment. Must manually go upload to account in UKBB.
+write.csv(df, "compiled_codelist.csv", row.names=FALSE)
+```

@@ -1,0 +1,1036 @@
+---
+title: "HbA1c analysis"
+author: "Ethan de Villiers"
+date: "`r Sys.Date()`"
+output: html_document
+---
+`r #requires bb_init_analysis.Rmd`
+
+``` {r GLOBAL VARS}
+DATA_INFECTIONS_FILEID = "file-#" # Obtain UKbb-hosted file-id of infections_df_{date}.csv file
+
+#> store list of descriptive variables which are frequently used
+DESCRIPTIVE_BASELINE_VARS = c("assess_age", "sex", 'diabetes_diagnosed', 'whr', 'glucose', 'hba1c', 'hdl_cholesterol', 'ldl_cholesterol', 'total_cholesterol', 'bmi', 'th_grs', 'fg_grs', 'hba1c_glyc_grs', 'hba1c_nonglyc_grs')
+
+#> DESCRIPTIVES_METRIC value accepts either "mean" or "median". Dictates what infections_df cohort descriptives table reports
+DESCRIPTIVES_METRIC = "median" # default is median. Reports every baseline var as: "median (lower_quart - upper_quart)"
+# DESCRIPTIVES_METRIC = "mean" # default is median. Reports every baseline var as: "mean". Have not configured to accept StDev
+```
+
+``` {r Loading data}
+#> Download infections_df .csv file
+system(paste(
+  'dx download',
+  DATA_INFECTIONS_FILEID
+))
+
+#> Load in df, keep raw_data untouched in case of error.
+raw_df = read_csv('infections_df_2024-03-12.csv')
+
+# Create clean DF for working with, exclude patients with mixed infections ~11,000
+infections_df = raw_df %>%
+  filter(infection_type != "mixed")
+```
+
+``` {r Descriptive Stats Tables}
+#> ---------- Manually print N numbers for viewing/copying ------------------ <#
+#> N numbers for each classification:
+#>  - bacterial: 40389  
+#>  - control  :431973  
+#>  - fungal   :   703  
+#>  - mixed    : 11329  
+#>  - viral    : 17961
+infections_df %>%
+  mutate(infection_type = as.factor(infection_type)) %>%
+  select(infection_type) %>%
+  summary()
+
+
+
+#> -------------------------- DESCRIPTIVE TABLE  ------------------ <#
+#>  * rename_vars() function which maps data-names to human-readable names
+#>  * creation of temp dataframe which houses our temporary descriptive data
+#>  * forloop to iterate through descriptive columns in batches and amalgamate data
+
+#> function to manually rename variables to human-readable
+rename_vars = function(x) {
+  x = gsub("_", " ", x)
+  x = gsub("assess", "assessment", x)
+  x = gsub("whr", "waist-hip-ratio", x)
+  x = gsub("th grs", "two hour glucose GRS", x) 
+  x = gsub("fg grs", "fasting glucose GRS", x)
+  x = gsub("hba1c gly grs", "glycaemic hba1c GRS", x)
+  x = gsub("hba1c nongly grs", "non-glycaemic HbA1c GRS", x)
+  x = gsub("diabetes diagnosed", "Diabetes Prevalence", x)
+  return(x)
+}
+
+#> Generate temporary descriptive table, ordered by column
+#>  - TO understand what this table looks like, highly recommend view(temp) once run
+#>  - Modify categorical variables --> binary
+#>  - Summarise to create mean median mode, round mean and median
+temp = infections_df %>%
+  group_by(infection_type) %>%
+  mutate(
+    sex = ifelse(
+      sex == 'Male',
+      0,
+      ifelse(
+        sex == 'Female',
+        1,
+        NA
+      )
+    ),
+    diabetes_diagnosed = ifelse(
+      diabetes_diagnosed == 'Yes',
+      1,
+      ifelse(
+        diabetes_diagnosed == 'No',
+        0,
+        NA
+      )
+    ) 
+  ) %>%
+  summarise(across(
+    DESCRIPTIVE_BASELINE_VARS,
+    list(
+      mean = ~ round(mean(., na.rm = TRUE), 2),
+      median = ~ round(median(., na.rm = TRUE), 2),
+      lower_q = ~ round(quantile(., na.rm = TRUE)[2], 2),
+      upper_q = ~ round(quantile(., na.rm = TRUE)[4], 2),
+      N = ~ sum(!is.na(.))
+    )
+  ))
+
+#> -------------------------- DESCRIPTIVE TABLE GENERATION  ------------------ <#
+#> Variables required to iterate through columns, don't change unless temp is altered.
+var_index = 1 # used to iterate through descriptive variables
+number_columns = 5 # number of metrics (mean, median, lower_q, upper_q, N) per descriptive (DESCRIPTIVE_BASELINE_VARS) captured in temp df
+formatted_temp = temp[, 1] # Array that contains infection classification info: bacterial/fungal/viral
+
+
+#> This loop is pretty logic heavy, prepare yourself!
+#>  - For () loop iterates through every column, starting from the 2nd column
+#>     > 2nd column because first column is infection type, irrelevant for descriptive data
+#>  - For() loop iterates once every 5 columns, because there are 5 values (mean, median, LQ, UQ, N = columns) stored per descriptive (DESCRIPTIVE_BASELINE_VARS)
+#>  - In every 5-column iteration, we extract infection type, and columns 2-4 (corresponding to median, LQ and UQ)
+#>  - we join it to format it prettily, and then add it as a single new column onto dataset.
+for (i in seq(2, ncol(temp), by = number_columns)) {
+  
+  extracted_columns = 1
+  
+  if (DESCRIPTIVES_METRIC == "mean"){
+   extracted_columns = c(
+     1, # corresponds to infection classification info
+     i # corresponds to first column per descriptive = mean
+   )
+  } else {
+    extracted_columns = c(
+      1, # corresponds to infection classification info
+      i+1, # corresponds to 2nd column per descriptive = median
+      i+2, # corresponds to 3rd column per descriptive = lower quartile
+      i+3 # corresponds to 4th column per descriptive = upper quartile
+    )
+  }
+  
+  var_data = temp[, extracted_columns] # extract infection type (for left-joining), based on DESCRIPTIVES_METRIC configuration
+  colnames(var_data) = c('infection_type', 'median', 'lq', 'uq') # rename to standardise next processing call
+
+  #> Create dynamically generated column name and collapse extracted columns as the value of the column, removing all other columns
+  var_data = var_data %>%
+    mutate(!!sym(paste0(DESCRIPTIVE_BASELINE_VARS[var_index])) := paste0(median, " (", lq, " - ", uq, ")")) %>%
+    select(infection_type, !!sym(paste0(DESCRIPTIVE_BASELINE_VARS[var_index])))
+  
+  formatted_temp = formatted_temp %>%
+    left_join(var_data, by = "infection_type") # add dynamically generated column with extracted summary stats into formatted_temp df by infection type 
+
+  var_index = var_index + 1 # cycle to next DESCRIPTIVE_BASELINE_VAR
+}
+
+
+#> ----------------------- BINARY DESCRIPTIVES ADJUSTMENT  ------------------ <#
+#> Check if median was used to report descriptives, because if so: sex and diabetes_diagnosed descriptives are incorrectly reported.
+if (DESCRIPTIVES_METRIC == "median"){
+  formatted_temp = formatted_temp %>%
+    mutate(
+      sex = unlist(temp[,7]),
+      diabetes_diagnosed = unlist(temp[,7])
+    )
+}
+
+#> ------------------ TIDY-FYING / TABULARISING DESC TABLE ------------------ <#
+#> rename using rename function to get human-readable (not data) names
+formatted_temp = formatted_temp %>%
+    rename_with(rename_vars)
+
+# Flip columns x rows of the dataframe
+desc_table = data.frame(t(formatted_temp[-1]))
+colnames(desc_table) = unlist(formatted_temp[, 1])
+
+# Saving as .csv to /saveables/ as descriptive_stats.csv
+write.csv(
+  desc_table,
+  file = paste0("saveables/tables/", "descriptive_stats.csv")
+)
+
+# Clean environment
+remove(DESCRIPTIVE_BASELINE_VARS, rename_vars, temp, formatted_temp, var_index, var_data, i)
+```
+
+``` {r Glycaemic: infection-specific df creation}
+#> ------------------ Creating infection vs control dataframes ------------------ <#
+# BACTERIAL vs CONTROL
+bacterial_df = infections_df %>%
+  filter(bacterial == 1 | control == 1) %>%
+  mutate(cat = "bacterial")
+
+# FUNGAL vs CONTROL
+fungal_df = infections_df %>%
+  filter(fungal == 1 | control == 1) %>%
+  mutate(cat = "fungal")
+
+# VIRAL vs CONTROL
+viral_df = infections_df %>%
+  filter(viral == 1 | control == 1) %>%
+  mutate(cat = "viral")
+
+```
+
+``` {r HbA1c histograms: infection (bact/fung/vir) vs control}
+#> ------------------ /saveables/graphs HbA1c distributions ------------------ <#
+#> Vector defining colours for images:
+colors = c("bacterial" = "blue", "fungal" = "red", "viral" = "green", "control" = "white")
+
+#> Creating singular plot dataframe
+temp = rbind(
+  bacterial_df,
+  fungal_df,
+  viral_df
+)
+
+#> ------------------ Graphing ------------------ <#
+graph_hba1c_infectionVScontrol = ggplot(temp, aes(x = hba1c, fill = infection_type)) + 
+  geom_density(alpha = 0.5, position = "identity") +
+  scale_x_continuous(limits = c(20, 55)) +
+  labs(
+    x = "HbA1c (mmol/mol)"
+  )+
+  scale_fill_manual(values = colors) +
+  facet_wrap(~cat, ncol = 1)
+
+# save
+ggsave(
+  plot = graph_hba1c_infectionVScontrol,
+  paste0("./saveables/graphs/hba1c_graph_descriptives.png"),
+  width = 8,
+  height = 6
+)
+
+#> Clean env as always
+remove(temp, tempviral, tempfungal, tempbacterial, colors)
+```
+
+``` {r Observational association: Logistic regression}
+#> ------------- Creating infection-specific regression models ------------- <#
+#Bacterial vs Controls
+bacterial_lr = glm(bacterial ~ hba1c, # bacterial infection outcome predicted by HbA1c
+  data = bacterial_df, # using bacterial/control-specific df
+  family = "binomial"
+)
+
+#Fungal vs controls
+fungal_lr = glm(fungal ~ hba1c, # fungal infection outcome predicted by HbA1c
+  data = fungal_df, # using fungal/control-specific df
+  family = "binomial"
+)
+
+#Viral vs controls
+viral_lr = glm(viral ~ hba1c, # viral infection outcome predicted by HbA1c
+  data = viral_df, # using viral/control-specific df
+  family = "binomial"
+)
+
+#> ---------- Graphing Observational Association Odds ------------- <#
+#> Graphing with graph_summs()
+graph_logreg_hba1cVSinfection =  plot_summs(
+  bacterial_lr,
+  fungal_lr,
+  viral_lr,
+  model.names = c("Bacterial ***", "Fungal ***", "Viral ***"), # manually configure significance from P-values provide
+  exp = TRUE,
+  legend.title = "Infections",
+  point.size = 10,
+  line.size = c(0.8, 2)
+) +
+  xlab("Odds of Infection per 1 mmol/mol HbA1c increase")
+
+# Going into theme list which defines Y axis text and setting blank
+graph_logreg_hba1cVSinfection$theme$axis.text.y <- element_blank()
+
+# save
+ggsave(
+  plot = graph_logreg_hba1cVSinfection,
+  paste0("./saveables/graphs/logreg_association_hba1cinfection.png"),
+  width = 6,
+  height = 3
+)
+```
+
+``` {r Observationl association: Value reporting table}
+#> ------------------------ P-Values of LogReg ------------------------------ <#
+#> Puling coefficients + CONFINT + P values
+coef_values = data.frame(
+  Origin = c("Bacterial", "Fungal", "Viral"),
+  Coef_logit = c(
+    summary(bacterial_lr)$coefficients["hba1c", 1],
+    summary(fungal_lr)$coefficients["hba1c", 1],
+    summary(viral_lr)$coefficients["hba1c", 1]
+  )
+)
+
+# pulling 95% confidence intervals to add into coef_values
+confint_values_bacterial = confint(bacterial_lr, "hba1c")
+confint_values_fungal = confint(fungal_lr, "hba1c")
+confint_values_viral = confint(viral_lr, "hba1c")
+
+# Store Confidence Intervals in Data Frames
+coef_values = coef_values %>%
+ mutate(
+    Upper_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[2],
+      Origin == "Fungal" ~ confint_values_fungal[2],
+      Origin == "Viral" ~ confint_values_viral[2]
+    ),
+    Lower_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[1],
+      Origin == "Fungal" ~ confint_values_fungal[1],
+      Origin == "Viral" ~ confint_values_viral[1]
+    ),
+ )
+
+# P values
+# Extract P-values for the bmi coefficient from each model
+p_values_bacterial = summary(bacterial_lr)$coefficients["hba1c", 4]
+p_values_fungal = summary(fungal_lr)$coefficients["hba1c", 4]
+p_values_viral = summary(viral_lr)$coefficients["hba1c", 4]
+
+# Add P-values to coef_values
+coef_values = coef_values %>%
+ mutate(
+    P_Value = case_when(
+      Origin == "Bacterial" ~ p_values_bacterial,
+      Origin == "Fungal" ~ p_values_fungal,
+      Origin == "Viral" ~ p_values_viral
+    )
+ )
+
+
+#> Save values as CSV
+write.csv(
+  coef_values,
+  file = paste0("saveables/tables/", "ObsvAssoc_logreg_HBA1C_values.csv"),
+  row.names=FALSE
+)
+```
+
+``` {r Observational association: Power calculation}
+WebPower::wp.logistic(n=500000, p0=0.10, p1=1.03*0.1, alpha=0.05, alternative = "two.sided", family="Bernoulli") # power = 94%
+```
+
+``` {r Mendelian Randomisation Analysis: Glycaemic HbA1c}
+#> -------------------------------- MR DF -------------------------------- <#
+# Create linear model to predict genetic HbA1c
+hba1c_gly_assoc=glm(
+  data = infections_df,
+  formula = hba1c ~ hba1c_glyc_grs,
+  na.action="na.exclude" # remove anyone without GRS data
+)
+
+#> Create MR df with eid, predicted HbA1c based on linear model, including residuals
+#>  - Then inner_join all baseline data onto those that have GRS
+hba1c_gly_frame = data.frame(
+  eid = infections_df$eid,
+  gly_pred = predict(hba1c_gly_assoc,infections_df),
+  gly_resid = residuals(hba1c_gly_assoc,na.action=na.exclude)
+) %>%
+  inner_join(infections_df) %>%
+  filter(!is.na(gly_pred))
+
+
+#> ------------------------Density of Glyc GRS ------------------------------ <#
+#>  - can see participants in UK biobank show some variation -0.3 --> 0.3
+#>  - but groups of infections dont differ
+
+# ggplot(hba1c_gly_frame, aes(x = hba1c_glyc_grs, fill = infection_type)) + 
+#   geom_density(alpha = 0.3, position = "identity") +
+#   labs(
+#     x = "Glycaemic-HbA1c Genetic Risk Score"
+#   )
+
+#> ---------------- Recreating infection-sepcific DF for MR ----------------- <#
+# BACTERIAL vs CONTROL HBA1C
+bacterial_df = hba1c_gly_frame %>%
+  filter(bacterial == 1 | control == 1) %>%
+  mutate(cat = "bacterial")
+
+# FUNGAL vs CONTROL HBA1C
+fungal_df = hba1c_gly_frame %>%
+  filter(fungal == 1 | control == 1) %>%
+  mutate(cat = "fungal")
+
+# VIRAL vs CONTROL HBA1C
+viral_df = hba1c_gly_frame %>%
+  filter(viral == 1 | control == 1) %>%
+  mutate(cat = "viral")
+
+
+#> -------------------------------- MR -------------------------------------- <#
+
+#Bacterial vs Controls LOGREG-MR
+bacterial_lr = glm(bacterial ~ gly_pred,
+  data = bacterial_df,
+  family = "binomial"
+)
+
+#Fungal LOGREG-MR
+fungal_lr = glm(fungal ~ gly_pred,
+  data = fungal_df,
+  family = "binomial"
+)
+
+#Viral LOGREG-MR
+viral_lr = glm(viral ~ gly_pred,
+  data = viral_df,
+  family = "binomial"
+)
+
+#> Graphing with graph_summs()
+graph_logreg_genHBA1CVSinfection = plot_summs(
+  bacterial_lr,
+  fungal_lr,
+  viral_lr,
+  model.names = c("Bacterial", "Fungal", "Viral"),
+  exp = TRUE,
+  legend.title = "Infections",
+  point.size = 10,
+  line.size = c(0.8, 2)
+) +
+  xlab("Odds of Infection per genetically-predicted 1 mmol/mol HbA1c increase")
+
+# Going into theme list which defines Y axis text and setting blank
+graph_logreg_genHBA1CVSinfection$theme$axis.text.y = element_blank()
+
+# save
+ggsave(
+  plot = graph_logreg_genHBA1CVSinfection,
+  paste0("./saveables/graphs/logreg_MR_hba1cinfection.png"),
+  width = 6,
+  height = 3
+)
+```
+
+``` {r Mendelian Randomisation reporting table: Glycaemic HbA1c}
+#> ------------------------ P-Values of LogReg ------------------------------ <#
+#> Puling coefficients + CONFINT + P values
+coef_values = data.frame(
+  Origin = c("Bacterial", "Fungal", "Viral"),
+  Coef_logit = c(
+    summary(bacterial_lr)$coefficients["gly_pred", 1],
+    summary(fungal_lr)$coefficients["gly_pred", 1],
+    summary(viral_lr)$coefficients["gly_pred", 1]
+  )
+)
+
+# pulling 95% confidence intervals to add into coef_values
+confint_values_bacterial = confint(bacterial_lr, "gly_pred")
+confint_values_fungal = confint(fungal_lr, "gly_pred")
+confint_values_viral = confint(viral_lr, "gly_pred")
+
+# Store Confidence Intervals in Data Frames
+coef_values = coef_values %>%
+ mutate(
+    Upper_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[2],
+      Origin == "Fungal" ~ confint_values_fungal[2],
+      Origin == "Viral" ~ confint_values_viral[2]
+    ),
+    Lower_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[1],
+      Origin == "Fungal" ~ confint_values_fungal[1],
+      Origin == "Viral" ~ confint_values_viral[1]
+    ),
+ )
+
+# P values
+# Extract P-values for the bmi coefficient from each model
+p_values_bacterial = summary(bacterial_lr)$coefficients["gly_pred", 4]
+p_values_fungal = summary(fungal_lr)$coefficients["gly_pred", 4]
+p_values_viral = summary(viral_lr)$coefficients["gly_pred", 4]
+
+# Add P-values to coef_values
+coef_values = coef_values %>%
+ mutate(
+    P_Value = case_when(
+      Origin == "Bacterial" ~ p_values_bacterial,
+      Origin == "Fungal" ~ p_values_fungal,
+      Origin == "Viral" ~ p_values_viral
+    )
+ )
+
+
+#> Save values as CSV
+write.csv(
+  coef_values,
+  file = paste0("saveables/tables/", "MR_GLYC_HBA1C_logreg_pvalues.csv"),
+  row.names=FALSE
+)
+```
+
+``` {r Mendelian Randomisation Analysis: NONGlycaemic HbA1c}
+#> ------------------------------ MR DF ------------------------------------ <#
+# Linear model to create PREDICTED NON-glycaemia based on GRS
+hba1c_nongly_assoc=glm(
+  data = infections_df,
+  formula = hba1c ~ hba1c_nonglyc_grs,
+  na.action="na.exclude"
+)
+
+# Create MR df with eid, predicted HbA1c based on linear model, including residuals
+hba1c_nongly_frame = data.frame(
+  eid=infections_df$eid,
+  nongly_pred=predict(hba1c_nongly_assoc,infections_df),
+  nongly_resid=residuals(hba1c_nongly_assoc,na.action=na.exclude)
+) %>%
+  inner_join(infections_df) %>%
+  filter(!is.na(nongly_pred))
+
+#> ------------------------Density of NONGLYC GRS ------------------------------ <#
+ggplot(hba1c_nongly_frame, aes(x = hba1c_nonglyc_grs, fill = infection_type)) + 
+  geom_density(alpha = 0.3, position = "identity") +
+  labs(
+    x = "Non-Glycaemic HbA1c Genetic Risk Score"
+  )
+
+#> ---------------- Recreating infection-sepcific DF for MR ----------------- <#
+# BACTERIAL vs CONTROL HBA1C
+bacterial_df = hba1c_nongly_frame %>%
+  filter(bacterial == 1 | control == 1) %>%
+  mutate(cat = "bacterial")
+
+# FUNGAL vs CONTROL HBA1C
+fungal_df = hba1c_nongly_frame %>%
+  filter(fungal == 1 | control == 1) %>%
+  mutate(cat = "fungal")
+
+# VIRAL vs CONTROL HBA1C
+viral_df = hba1c_nongly_frame %>%
+  filter(viral == 1 | control == 1) %>%
+  mutate(cat = "viral")
+
+
+#> ---------------- LogReg MRs ----------------- <#
+
+#Bacterial vs Controls LOGREG-MR
+bacterial_lr = glm(bacterial ~ nongly_pred,
+  data = bacterial_df,
+  family = "binomial"
+)
+
+#Fungal LOGREG-MR
+fungal_lr = glm(fungal ~ nongly_pred,
+  data = fungal_df,
+  family = "binomial"
+)
+
+#Viral LOGREG-MR
+viral_lr = glm(viral ~ nongly_pred,
+  data = viral_df,
+  family = "binomial"
+)
+
+#> ---------------- Forest Plot of MRs ----------------- <#
+
+#> Graphing with graph_summs()
+graph_logreg_nonglyc_genHBA1CVSinfection = plot_summs(
+  bacterial_lr,
+  fungal_lr,
+  viral_lr,
+  model.names = c("Bacterial **", "Fungal", "Viral"),
+  exp = TRUE,
+  legend.title = "Infections",
+  point.size = 10,
+  line.size = c(0.8, 2)
+) +
+  xlab("Odds of Infection per genetically-predicted 1 mmol/mol HbA1c increase")
+
+# Going into theme list which defines Y axis text and setting blank
+graph_logreg_nonglyc_genHBA1CVSinfection$theme$axis.text.y = element_blank()
+
+# save
+ggsave(
+  plot = graph_logreg_nonglyc_genHBA1CVSinfection,
+  paste0("./saveables/graphs/logreg_MR_nonglyc_hba1cinfection.png"),
+  width = 6,
+  height = 3
+)
+
+#> Summaries for P values
+summary(bacterial_lr)
+summary(fungal_lr)
+summary(viral_lr)
+```
+
+``` {r Mendelian randomisation Reporting table: NONGlycaemic HbA1c}
+#> ------------------------ P-Values of LogReg ------------------------------ <#
+#> Puling coefficients + CONFINT + P values
+coef_values = data.frame(
+  Origin = c("Bacterial", "Fungal", "Viral"),
+  Coef_logit = c(
+    summary(bacterial_lr)$coefficients["nongly_pred", 1],
+    summary(fungal_lr)$coefficients["nongly_pred", 1],
+    summary(viral_lr)$coefficients["nongly_pred", 1]
+  )
+)
+
+# pulling 95% confidence intervals to add into coef_values
+confint_values_bacterial = confint(bacterial_lr, "nongly_pred")
+confint_values_fungal = confint(fungal_lr, "nongly_pred")
+confint_values_viral = confint(viral_lr, "nongly_pred")
+
+# Store Confidence Intervals in Data Frames
+coef_values = coef_values %>%
+ mutate(
+    Upper_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[2],
+      Origin == "Fungal" ~ confint_values_fungal[2],
+      Origin == "Viral" ~ confint_values_viral[2]
+    ),
+    Lower_CI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[1],
+      Origin == "Fungal" ~ confint_values_fungal[1],
+      Origin == "Viral" ~ confint_values_viral[1]
+    ),
+ )
+
+# P values
+# Extract P-values for the bmi coefficient from each model
+p_values_bacterial = summary(bacterial_lr)$coefficients["nongly_pred", 4]
+p_values_fungal = summary(fungal_lr)$coefficients["nongly_pred", 4]
+p_values_viral = summary(viral_lr)$coefficients["nongly_pred", 4]
+
+# Add P-values to coef_values
+coef_values = coef_values %>%
+ mutate(
+    P_Value = case_when(
+      Origin == "Bacterial" ~ p_values_bacterial,
+      Origin == "Fungal" ~ p_values_fungal,
+      Origin == "Viral" ~ p_values_viral
+    )
+ )
+
+
+#> Save values as CSV
+write.csv(
+  coef_values,
+  file = paste0("saveables/tables/", "MR_NONGLYC_HBA1C_logreg_pvalues.csv"),
+  row.names=FALSE
+)
+```
+
+``` {r Uploading regression model-reporting tables to DNANexus}
+
+system(paste0('dx upload ', "saveables/tables/MR_NONGLYC_HBA1C_logreg_pvalues.csv"))
+system(paste0('dx upload ', "saveables/tables/MR_GLYC_HBA1C_logreg_pvalues.csv"))
+system(paste0('dx upload ', "saveables/tables/ObsvAssoc_logreg_HBA1C_values.csv"))
+
+```
+
+``` {r GCK plotting HbA1cs}
+#> ------------------ /saveables/graphs HbA1c distributions ------------------ <#
+cats = c("bacterial\n(n=40,389; GCK=15)", "fungal\n(n=703; GCK=1)", "viral\n(n=17,961; GCK=5)", "control\n(n=431,973; GCK=162)")
+
+
+# BACTERIAL vs CONTROL
+bacterial_df = infections_df %>%
+  filter(bacterial == 1) %>%
+  mutate(cat = cats[1])
+
+# FUNGAL vs CONTROL
+fungal_df = infections_df %>%
+  filter(fungal == 1) %>%
+  mutate(cat = cats[2])
+
+# VIRAL vs CONTROL
+viral_df = infections_df %>%
+  filter(viral == 1) %>%
+  mutate(cat = cats[3])
+
+control_df = infections_df %>%
+  filter(control == 1) %>%
+  mutate(cat = cats[4])
+
+#> -------- Ns --------- <#
+count(bacterial_df %>% filter(GCK)) # n = 15
+count(fungal_df %>% filter(GCK)) # n = 1
+count(viral_df %>% filter(GCK)) # n = 5
+count(control_df %>% filter(GCK)) # n = 162
+
+#> -------- Medians --------- <#
+# median(bacterial_df %>% filter(GCK) %>% pull(hba1c), na.rm = TRUE)
+# median(fungal_df %>% filter(GCK) %>% pull(hba1c), na.rm = TRUE)
+# median(viral_df %>% filter(GCK) %>% pull(hba1c), na.rm = TRUE)
+# median(control_df %>% filter(GCK) %>% pull(hba1c), na.rm = TRUE)
+# 
+# median(bacterial_df %>% filter(!GCK) %>% pull(hba1c), na.rm = TRUE)
+# median(fungal_df %>% filter(!GCK) %>% pull(hba1c), na.rm = TRUE)
+# median(viral_df %>% filter(!GCK) %>% pull(hba1c), na.rm = TRUE)
+# median(control_df %>% filter(!GCK) %>% pull(hba1c), na.rm = TRUE)
+
+#> Vector defining colours for images:
+colors = c("GCK" = "blue", "No GCK" = "white")
+
+#> Creating singular plot dataframe
+temp = rbind(
+  bacterial_df,
+  #fungal_df, # FUNGAL EXCLUDED BECAUSE N = 1
+  viral_df,
+  control_df
+) %>%
+  mutate(
+    GCK = ifelse(GCK == 1, "GCK", "No GCK"),
+    cat = factor(cat, levels = cats)
+  )
+
+#> ------------------ Graphing ------------------ <#
+graph_hba1c_gckVSinfection = ggplot(temp, aes(x = hba1c, fill = GCK)) + 
+  geom_density(alpha = 0.5, position = "identity") +
+  scale_x_continuous(limits = c(20, 65)) +
+  labs(
+    x = "HbA1c (mmol/mol)"
+  )+
+  scale_fill_manual(values = colors) +
+  facet_wrap(~cat, ncol = 1) +
+  guides(fill=guide_legend(title="Pathogenic GCK mutation"))
+
+# save
+ggsave(
+  plot = graph_hba1c_gckVSinfection,
+  paste0("./saveables/graphs/hba1c_graph_GCK_descriptives.png"),
+  width = 8,
+  height = 6
+)
+
+#> Clean env as always
+remove(temp, colors)
+```
+
+``` {r GCK Fisher's tests}
+#> -------------------------- DF creation -------------------------------- <#
+# BACTERIAL + GCK Contingency table
+bacterial_df = infections_df %>%
+  filter(bacterial == 1 | control == 1) %>%
+  select(GCK, bacterial) %>%
+  mutate(
+    GCK = as.factor(ifelse(GCK == 1, "GCK", "No GCK")),
+    bacterial = as.factor(ifelse(bacterial == 1, "Bacterial Infection", "No Infection"))
+  )
+
+# Viral + GCK binaries
+viral_df = infections_df %>%
+  filter(viral == 1 | control == 1) %>%
+  select(GCK, viral) %>%
+  mutate(
+    GCK = as.factor(ifelse(GCK == 1, "GCK", "No GCK")),
+    viral = as.factor(ifelse(viral == 1, "Viral Infection", "No Infection"))
+  )
+
+# Fungal + GCK binaries
+fungal_df = infections_df %>%
+  filter(fungal == 1 | control == 1) %>%
+  select(GCK, fungal) %>%
+  mutate(
+    GCK = as.factor(ifelse(GCK == 1, "GCK", "No GCK")),
+    fungal = as.factor(ifelse(fungal == 1, "Fungal Infection", "No Infection"))
+  )
+
+#> -------------------------- Report Fischers tests -------------------------- <#
+
+#> Puling coefficients + CONFINT + P values
+coef_values = data.frame(
+  Origin = c("Bacterial", "Fungal", "Viral"),
+  coef_OR = c(
+    fisher.test(table(bacterial_df$GCK, bacterial_df$bacterial))$estimate,
+    fisher.test(table(fungal_df$GCK, fungal_df$fungal))$estimate,
+    fisher.test(table(viral_df$GCK, viral_df$viral))$estimate
+  )
+)
+
+# pulling 95% confidence intervals to add into coef_values
+confint_values_bacterial = fisher.test(table(bacterial_df$GCK, bacterial_df$bacterial))$conf.int
+confint_values_fungal = fisher.test(table(fungal_df$GCK, fungal_df$fungal))$conf.int
+confint_values_viral = fisher.test(table(viral_df$GCK, viral_df$viral))$conf.int
+
+# Store Confidence Intervals in Data Frames
+coef_values = coef_values %>%
+ mutate(
+    uCI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[2],
+      Origin == "Fungal" ~ confint_values_fungal[2],
+      Origin == "Viral" ~ confint_values_viral[2]
+    ),
+    lCI = case_when(
+      Origin == "Bacterial" ~ confint_values_bacterial[1],
+      Origin == "Fungal" ~ confint_values_fungal[1],
+      Origin == "Viral" ~ confint_values_viral[1]
+    ),
+ )
+
+# Add P-values to coef_values
+coef_values = coef_values %>%
+ mutate(
+    pvalue = case_when(
+      Origin == "Bacterial" ~ fisher.test(table(bacterial_df$GCK, bacterial_df$bacterial))$p.value,
+      Origin == "Fungal" ~ fisher.test(table(fungal_df$GCK, fungal_df$fungal))$p.value,
+      Origin == "Viral" ~ fisher.test(table(viral_df$GCK, viral_df$viral))$p.value
+    )
+ )
+
+
+#> Save values as CSV
+write.csv(
+  coef_values,
+  file = paste0("saveables/tables/", "FISCHERS_GCK_pvalues.csv"),
+  row.names=FALSE
+)
+
+
+#> -------------------------- Foresplot Graphing Fischers values -------------------------- <#
+
+graph_gck_foresplot = ggplot(
+  coef_values %>%
+    mutate(
+      Origin = factor(Origin, levels = rev(c("Bacterial", "Fungal", "Viral")))
+    ),
+   aes(x = coef_OR, y = Origin, color = Origin)
+)+
+  geom_vline(xintercept = 1,colour='red') +
+  geom_point(size=2) +
+  geom_errorbarh(aes(xmin = lCI, xmax = uCI),linewidth=0.8) +
+  theme_minimal() +
+  xlab("Odds Ratio with pathogenic GCK mutation") +
+  labs(title = "Investigating GCK association with infection outcomes") +
+  theme(
+    axis.title.y=element_blank(), # remove Harry's Y axis text pulled from colname ('Origin')
+    legend.position = "none" # remove legend
+  )
+                               
+
+#> Saving
+ggsave(
+  plot = graph_gck_foresplot,
+  paste0("saveables/graphs/summary_GCK_forestplot.png"),
+  width = 7,
+  height = 4.5,
+  dpi = 600
+)
+
+```
+
+``` {r LEGACY code: Exploring data}
+#> ------------------ INFO -------------- <#
+#> Only prints graphs to screen to ensure /saveables/ directory only contains essential dresults
+#> Does not offer much discussion or use, just for exploring and visualising data better
+
+#> ------------------ genetically-predicted HbA1c distributions -------------- <#
+ggplot(infections_df, aes(x=hba1c, y=hba1c_glyc_grs, colour = infection_type)) + 
+  geom_point() +
+  labs(
+    y = "Participant Glycaemic Genetic Risk Score",
+    x = "Participant HbA1c (mmol/mol)"
+  ) +
+  scale_x_continuous(limits = c(0,180)) +
+  scale_y_continuous(limits = c(-1,1))
+
+ggplot(infections_df, aes(x=hba1c, y=hba1c_nonglyc_grs, colour = infection_type)) + 
+  geom_point() +
+  labs(
+    y = "Participant Non-Glycaemic Genetic Risk Score",
+    x = "Participant HbA1c (mmol/mol)"
+  ) +
+  scale_x_continuous(limits = c(0,180)) +
+  scale_y_continuous(limits = c(-1,1))
+
+
+#> --------------------- Geneticaly predicted HbA1c Density ----------------- <#
+#> Vector defining colours for images:
+colors = c("bacterial" = "blue", "fungal" = "red", "viral" = "green", "control" = "white")
+
+ggplot(temp, aes(x = gly_pred, fill = infection_type)) + 
+  geom_density(alpha = 0.5, position = "identity") +
+  scale_x_continuous(limits = c(20, 55)) +
+  labs(
+    x = "Genetically predicted HbA1c (mmol/mol)"
+  )+
+  scale_fill_manual(values = colors) +
+  facet_wrap(~cat, ncol = 1)
+
+ggplot(temp, aes(x = nongly_pred, fill = infection_type)) + 
+  geom_density(alpha = 0.5, position = "identity") +
+  scale_x_continuous(limits = c(20, 55)) +
+  labs(
+    x = "Genetically predicted HbA1c (mmol/mol)"
+  )+
+  scale_fill_manual(values = colors) +
+  facet_wrap(~cat, ncol = 1)
+
+```
+
+``` {r LEGACY: Graph of Mutiple infections vs Control}
+#> Want to compare patients who have had MULTIPLE infections against controls - because MULTIPLE infections usually more extreme
+
+
+#> ---------------------------------- VIRAL --------------------------------- <#
+#> Create a control vs multiple viral infections group
+temp = infections_df %>%
+  mutate(multiple_infections = ifelse(
+    viral_multiple == TRUE,
+    TRUE,
+    ifelse(
+      control == TRUE,
+      FALSE,
+      NA
+    )
+  )) %>%
+  filter(!is.na(multiple_infections))
+
+#> re-create GRS compairson plot of control vs Multi viral infection
+grs_graph = ggplot(
+  temp %>%
+    pivot_longer(
+      cols = c('th_grs', 'fg_grs', 'hba1c_glyc_grs', 'hba1c_nonglyc_grs'),
+      names_to = "variable",
+      values_to = "value"
+    ),
+  aes(
+    x = value,
+    y = multiple_infections,
+    group = interaction(multiple_infections, variable),
+    colour = variable,
+    linetype = variable
+  )
+) +
+  geom_density_ridges(alpha = 0.3) +
+  labs(
+    x = "GRS",
+    y = "Freq. Density (Multiple infections [TRUE] vs Control [FALSE])"
+  ) +
+  facet_grid(variable ~ ., scales = "free_y") +
+  coord_cartesian(ylim = c(0, NA))  # Set the lower limit to 0, upper limit to NA (no upper limit)
+
+
+
+ggsave(
+  paste0("./saveables/graphs/", "mviral_control_grs_graph.png"),
+  plot = grs_graph,
+  width = 10,
+  height = 8
+)
+
+
+#> ------------------------------ Bacterial --------------------------------- <#
+#> Create a control vs multiple viral infections group
+temp = infections_df %>%
+  mutate(multiple_infections = ifelse(
+    bacterial_multiple == TRUE,
+    TRUE,
+    ifelse(
+      control == TRUE,
+      FALSE,
+      NA
+    )
+  )) %>%
+  filter(!is.na(multiple_infections))
+
+#> re-create GRS compairson plot of control vs Multi viral infection
+grs_graph = ggplot(
+  temp %>%
+    pivot_longer(
+      cols = c('th_grs', 'fg_grs', 'hba1c_glyc_grs', 'hba1c_nonglyc_grs'),
+      names_to = "variable",
+      values_to = "value"
+    ),
+  aes(
+    x = value,
+    y = multiple_infections,
+    group = interaction(multiple_infections, variable),
+    colour = variable,
+    linetype = variable
+  )
+) +
+  geom_density_ridges(alpha = 0.3) +
+  labs(
+    x = "GRS",
+    y = "Freq. Density (Multiple infections [TRUE] vs Control [FALSE])"
+  ) +
+  facet_grid(variable ~ ., scales = "free_y") +
+  coord_cartesian(ylim = c(0, NA))  # Set the lower limit to 0, upper limit to NA (no upper limit)
+
+
+
+ggsave(
+  paste0("./saveables/graphs/", "mbacterial_control_grs_graph.png"),
+  plot = grs_graph,
+  width = 10,
+  height = 8
+)
+
+#> --------------------------------- FUNGAL --------------------------------- <#
+#> Create a control vs multiple viral infections group
+temp = infections_df %>%
+  mutate(multiple_infections = ifelse(
+    fungal_multiple == TRUE,
+    TRUE,
+    ifelse(
+      control == TRUE,
+      FALSE,
+      NA
+    )
+  )) %>%
+  filter(!is.na(multiple_infections))
+
+#> re-create GRS compairson plot of control vs Multi viral infection
+grs_graph = ggplot(
+  temp %>%
+    pivot_longer(
+      cols = c('th_grs', 'fg_grs', 'hba1c_glyc_grs', 'hba1c_nonglyc_grs'),
+      names_to = "variable",
+      values_to = "value"
+    ),
+  aes(
+    x = value,
+    y = multiple_infections,
+    group = interaction(multiple_infections, variable),
+    colour = variable,
+    linetype = variable
+  )
+) +
+  geom_density_ridges(alpha = 0.3) +
+  labs(
+    x = "GRS",
+    y = "Freq. Density (Multiple infections [TRUE] vs Control [FALSE])"
+  ) +
+  facet_grid(variable ~ ., scales = "free_y") +
+  coord_cartesian(ylim = c(0, NA))  # Set the lower limit to 0, upper limit to NA (no upper limit)
+
+
+
+ggsave(
+  paste0("./saveables/graphs/", "mfungal_control_grs_graph.png"),
+  plot = grs_graph,
+  width = 10,
+  height = 8
+)
+
+#> Clean Environment
+remove(temp, grs_graph)
+```
